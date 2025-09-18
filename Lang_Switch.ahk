@@ -2,65 +2,92 @@
 #SingleInstance Force
 
 /*
-    Language_Switch v2.7 (reviewed), (c) Serverov 2025 + hardening by ❤Luna❤
+    Language_Switch v2.8 (patched), (c) Serverov 2025 + hardening by ❤Luna❤
     — Для AHK v2
     — Упрощённое переключение языков системными хоткеями Alt+Shift+0/1/2
     — Логирование + безопасные проверки
     — Исправлено: дублирование проверки enPrograms; корректная работа со строкой '"' в TransformText
-    
+    — Добавлено: анти-залипание модификаторов, «карантин» LCtrl после свитча, перевод LCtrl/RCtrl/F13 на обработку по up
+
     Nota Bene!
     ~~~~~~~~~~
-    
     Для Asus Vivobook и кнопки Copilot F23 необходимо переназначение ее scancode на F13.
-    
     Патч для реестра:
     ------------------------------------------------------------------------------
     Windows Registry Editor Version 5.00
-    
+
     [HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout]
     "Scancode Map"=hex:00,00,00,00,00,00,00,00,02,00,00,00,64,00,6e,00,00,00,00,00
     ------------------------------------------------------------------------------
-    
+
     Необходимо назначить однозначные комбинации для переключения языков:
         Eng = LAlt+LShift+0
         Rus = LAlt+LShift+1
         Ukr = LAlt+LShift+2
-   
-    
 */
+
+ENABLE_LOG := false  ; ← переключатель: true / false
 
 LOG_FILE := A_ScriptDir "\\Language_Switch.log"
  
-;Программы, для которых принудительно включается eng при активации нового окна:
+; Программы, для которых принудительно включается ENG при активации нового окна
 enPrograms := ["SecureCRT.exe", "csc_ui.exe"]
 
-DOUBLE_HOTKEY_MS := 400
+
+
+DOUBLE_HOTKEY_MS := 300
+global RCtrlSingleTimer := 0
+global F13SingleTimer := 0
+global BlockLCtrlUntil := 0    ; «карантин» — блокируем одиночный LCtrl короткое время после свитча
 lastWin := 0
-SetTimer(CheckActiveWindow, 1000)   ; v2: вызов функции в скобках
+SetTimer(CheckActiveWindow, 1000)
 
 ; === БАЗОВЫЕ ЯЗЫКОВЫЕ ВЫЗОВЫ ===
-SendLangDigit(d) {
-    try {
-        Send("!+" d)   ; Alt+Shift+<digit> (top row)
-    } catch as err {
-        ; fallback — максимально совместимый вариант с явными up/down
-        SendEvent("{LAlt down}{LShift down}{" d "}{LShift up}{LAlt up}")
-    }
+
+; --- анти-залипание модификаторов ---
+FixStickyMods() {
+    ; На всякий случай отпустим всё, что могло «повиснуть»
+    Send("{LAlt up}{RAlt up}{LShift up}{RShift up}{LControl up}{RControl up}")
 }
 
-ForceLang_ENG() => SendLangDigit("0")
-ForceLang_RUS() => SendLangDigit("1")
-ForceLang_UKR() => SendLangDigit("2")
+; --- жмём Alt+Shift+цифра безопасно ---
+SendLangDigit(d) {
+    FixStickyMods()
+    Sleep 10
+    try {
+        SendInput("!+" d)  ; Alt+Shift+<digit> (top row)
+    } catch as err {
+        SendEvent("{LAlt down}{LShift down}{" d "}{LShift up}{LAlt up}")
+    }
+    Sleep 10
+;    FixStickyMods()
+}
+
+ForceLang_ENG() {
+    global BlockLCtrlUntil
+    SendLangDigit("0")
+    BlockLCtrlUntil := A_TickCount + 120
+}
+
+ForceLang_RUS() {
+    global BlockLCtrlUntil
+    SendLangDigit("1")
+    BlockLCtrlUntil := A_TickCount + 120
+}
+
+ForceLang_UKR() {
+    global BlockLCtrlUntil
+    SendLangDigit("2")
+    BlockLCtrlUntil := A_TickCount + 120
+}
 
 ; === ЛОГ ===
 Log(msg) {
-    global LOG_FILE
+    global ENABLE_LOG, LOG_FILE
+    if !ENABLE_LOG
+        return
     time := FormatTime(, "yyyy-MM-dd HH:mm:ss")
-    try {
-        FileAppend(time " | " msg "`r`n", LOG_FILE)
-    } catch as err {
-        ; игнорируем ошибки логирования
-    }
+    try FileAppend(time " | " msg "`r`n", LOG_FILE)
 }
 
 ; === SAFE HELPERS ===
@@ -116,35 +143,36 @@ CheckActiveWindow() {
 }
 
 ; === ГОРЯЧИЕ КЛАВИШИ ===
-~LControl:: {
+~LControl up:: {
     try {
-        ForceLang_ENG()
+        ; блокируем одиночный LCtrl на короткое время после любого свитча
+        if (A_TickCount <= BlockLCtrlUntil)
+            return
+        ; тап: между down и up не было других клавиш
+        if (A_PriorKey = "LControl")
+            ForceLang_ENG()
     } catch as err {
         Log("LControl ENG failed: " err.Message)
     }
-    KeyWait("LControl")
 }
 
-~RControl:: {
-    try {
+~RControl up::
+{
+    ; двойной тап? → сразу UKR, иначе RUS
+    if (InStr(A_PriorHotkey, "RControl") && A_TimeSincePriorHotkey <= DOUBLE_HOTKEY_MS)
+        ForceLang_UKR()
+    else
         ForceLang_RUS()
-        if (A_PriorHotkey = "~RControl" && A_TimeSincePriorHotkey <= DOUBLE_HOTKEY_MS)
-            ForceLang_UKR()
-    } catch as err {
-        Log("RControl switch failed: " err.Message)
-    }
-    KeyWait("RControl")
 }
 
-<+<#F13:: {
-    try {
+<+<#F13 up::
+{
+    ; на всякий — убедимся, что модификаторы отпущены
+    KeyWait("LShift"), KeyWait("LWin")
+    if (InStr(A_PriorHotkey, "F13") && A_TimeSincePriorHotkey <= DOUBLE_HOTKEY_MS)
+        ForceLang_UKR()
+    else
         ForceLang_RUS()
-        if (A_PriorHotkey = "<+<#F13" && A_TimeSincePriorHotkey <= DOUBLE_HOTKEY_MS)
-            ForceLang_UKR()
-    } catch as err {
-        Log("F13 combo switch failed: " err.Message)
-    }
-    KeyWait("F13")
 }
 
 ^+L:: {
